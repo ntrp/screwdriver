@@ -331,7 +331,9 @@ async function createInternalBuild(config) {
  * @return {Set}                    A set of build ids that are visited
  */
 function dfs(workflowGraph, start, builds, visited) {
-    const jobId = workflowGraph.nodes.find(node => node.name === start).id;
+    const externalNodeRegex = RegExp(`:${start}$`);
+    const jobId = workflowGraph.nodes.find(node => node.name === start
+        || node.name.match(externalNodeRegex)).id;
     const nextJobs = workflowParser.getNextJobs(workflowGraph, { trigger: start });
 
     // If the start job has no build in parentEvent then just return
@@ -447,8 +449,8 @@ function parseJobInfo({ joinObj, currentJobName, nextJobName, pipelineId, build 
  * Fetch next build in workflowGraph
  * If next job is external, return latest build for that job
  * If next job is internal, return build matching job ID in internal builds list
+ * @param  {Factory}    buildFactory        Build factory
  * @param  {Factory}    eventFactory        Event factory
- * @param  {Factory}    jobFactory          Job factory
  * @param  {Factory}    pipelineFactory     Pipeline factory
  * @param  {Event}      event               Event
  * @param  {String}     externalJobName     Next job name
@@ -458,15 +460,25 @@ function parseJobInfo({ joinObj, currentJobName, nextJobName, pipelineId, build 
  * @return {Promise}                        Next build
  */
 async function getNextBuild({
-    isExternal, pipelineFactory, externalPipelineId, externalJobName, jobFactory,
-    eventFactory, event, workflowGraph, nextJobName }) {
+    isExternal, pipelineFactory, externalPipelineId, externalJobName,
+    eventFactory, event, workflowGraph, nextJobName, buildFactory }) {
     // If next build is external, return the latest build with same job ID
     if (isExternal) {
         const p = await pipelineFactory.get(externalPipelineId);
         const jobArray = await p.getJobs({ params: { name: externalJobName } });
-        const j = await jobFactory.get(jobArray[0].id);
+        const b = await buildFactory.list({
+            params: {
+                jobId: jobArray[0].id,
+                eventId: event.parentEventId,
+                status: 'CREATED'
+            },
+            paginate: {
+                count: 50
+            },
+            sort: 'descending'
+        });
 
-        return j.getLatestBuild({ status: 'CREATED' });
+        return b[0];
     }
     // Get finished internal builds from event
     let finishedInternalBuilds;
@@ -659,11 +671,11 @@ async function createOrRunNextBuild({ buildFactory, jobFactory, eventFactory, pi
         pipelineFactory,
         externalPipelineId,
         externalJobName,
-        jobFactory,
         eventFactory,
         event,
         workflowGraph,
-        nextJobName
+        nextJobName,
+        buildFactory
     });
 
     let newBuild;
@@ -908,7 +920,7 @@ exports.register = (server, options, next) => {
                             externalPipelineId: pipelineAndJob.externalPipelineId,
                             externalJobName: pipelineAndJob.externalJobName,
                             parentBuildId: build.id,
-                            isExternal,
+                            isExternal: EXTERNAL_TRIGGER_AND.test(nextJobToTriggerName),
                             workflowGraph,
                             nextJobName: nextJobToTriggerName,
                             externalBuild,
